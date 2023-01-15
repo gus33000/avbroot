@@ -50,7 +50,7 @@ def get_images(manifest):
     return images, boot_image
 
 
-def patch_ota_payload(f_in, f_out, file_size, magisk, privkey_avb, privkey_ota,
+def patch_ota_payload(f_in, f_out, file_size, magisk, custom_boot, privkey_avb, privkey_ota,
                       cert_ota):
     with tempfile.TemporaryDirectory() as temp_dir:
         extract_dir = os.path.join(temp_dir, 'extract')
@@ -65,6 +65,8 @@ def patch_ota_payload(f_in, f_out, file_size, magisk, privkey_avb, privkey_ota,
 
         print_status('Extracting', ', '.join(images), 'from the payload')
         ota.extract_images(f_in, manifest, blob_offset, extract_dir, images)
+        shutil.copyfile(os.path.join(extract_dir, f'{boot_image}.img'), os.path.join(extract_dir, f'original_boot.img'))
+        shutil.copyfile(custom_boot, os.path.join(extract_dir, f'{boot_image}.img'))
 
         boot_patches = [boot.MagiskRootPatch(magisk)]
         vendor_boot_patches = [boot.OtaCertPatch(magisk, cert_ota)]
@@ -79,6 +81,7 @@ def patch_ota_payload(f_in, f_out, file_size, magisk, privkey_avb, privkey_ota,
         print_status('Patching boot image')
         boot.patch_boot(
             avb,
+            os.path.join(extract_dir, f'original_boot.img'),
             os.path.join(extract_dir, f'{boot_image}.img'),
             os.path.join(patch_dir, f'{boot_image}.img'),
             privkey_avb,
@@ -90,6 +93,7 @@ def patch_ota_payload(f_in, f_out, file_size, magisk, privkey_avb, privkey_ota,
             print_status('Patching vendor_boot image')
             boot.patch_boot(
                 avb,
+                os.path.join(extract_dir, 'vendor_boot.img'),
                 os.path.join(extract_dir, 'vendor_boot.img'),
                 os.path.join(patch_dir, 'vendor_boot.img'),
                 privkey_avb,
@@ -122,7 +126,7 @@ def patch_ota_payload(f_in, f_out, file_size, magisk, privkey_avb, privkey_ota,
         )
 
 
-def patch_ota_zip(f_zip_in, f_zip_out, magisk, privkey_avb, privkey_ota,
+def patch_ota_zip(f_zip_in, f_zip_out, magisk, custom_boot, privkey_avb, privkey_ota,
                   cert_ota):
     with (
         zipfile.ZipFile(f_zip_in, 'r') as z_in,
@@ -183,6 +187,7 @@ def patch_ota_zip(f_zip_in, f_zip_out, magisk, privkey_avb, privkey_ota,
                         f_out,
                         info.file_size,
                         magisk,
+                        custom_boot,
                         privkey_avb,
                         privkey_ota,
                         cert_ota,
@@ -235,6 +240,7 @@ def patch_subcommand(args):
                 args.input,
                 temp_unsigned,
                 args.magisk,
+                args.custom_boot,
                 dec_privkey_avb,
                 dec_privkey_ota,
                 cert_ota,
@@ -275,6 +281,8 @@ def parse_args():
                        help='Path to new raw payload or OTA zip')
     patch.add_argument('--magisk', required=True,
                        help='Path to Magisk API')
+    patch.add_argument('--custom_boot', required=True,
+                       help='Path to Custom Boot')
     patch.add_argument('--privkey-avb', required=True,
                        help='Private key for signing root vbmeta image')
     patch.add_argument('--privkey-ota', required=True,

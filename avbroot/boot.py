@@ -154,7 +154,7 @@ class OtaCertPatch(BootImagePatch):
         shutil.copyfile(os.path.join(temp_dir, 'new-boot.img'), image_file)
 
 
-def patch_boot(avb, input_path, output_path, key, only_if_previously_signed,
+def patch_boot(avb, input_path, custom_input_path, output_path, key, only_if_previously_signed,
                patch_funcs):
     '''
     Call each function in patch_funcs against a boot image with vbmeta stripped
@@ -196,10 +196,10 @@ def patch_boot(avb, input_path, output_path, key, only_if_previously_signed,
         algorithm_name = 'SHA256_RSA4096'
 
     with util.open_output_file(output_path) as f:
-        shutil.copyfile(input_path, f.name)
+        shutil.copyfile(custom_input_path, f.name)
 
         # Strip the vbmeta footer from the boot image
-        avb.erase_footer(f.name, False)
+        # avb.erase_footer(f.name, False)
 
         # Invoke the patching functions
         for patch_func in patch_funcs:
