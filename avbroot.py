@@ -31,106 +31,42 @@ def print_status(*args, **kwargs):
     print('\x1b[1m*****', *args, '*****\x1b[0m', **kwargs)
 
 
-def get_images(manifest):
-    boot_image = 'boot'
-    vendor_boot_image = None
-
-    for p in manifest.partitions:
-        # Devices launching with Android 13 use a GKI init_boot ramdisk
-        if p.partition_name == 'init_boot':
-            boot_image = p.partition_name
-        # Older devices may not have vendor_boot
-        elif p.partition_name == 'vendor_boot':
-            vendor_boot_image = p.partition_name
-
-    images = ['vbmeta', boot_image]
-    if vendor_boot_image is not None:
-        images.append(vendor_boot_image)
-
-    return images, boot_image
-
-
-def patch_ota_payload(f_in, f_out, file_size, magisk, custom_boot, privkey_avb, privkey_ota,
-                      cert_ota):
+def patch_ota_payload(f_in, boot_out, vbmeta_out, file_size, custom_boot, privkey_avb):
     with tempfile.TemporaryDirectory() as temp_dir:
         extract_dir = os.path.join(temp_dir, 'extract')
-        patch_dir = os.path.join(temp_dir, 'patch')
-        payload_dir = os.path.join(temp_dir, 'payload')
         os.mkdir(extract_dir)
-        os.mkdir(patch_dir)
-        os.mkdir(payload_dir)
 
         version, manifest, blob_offset = ota.parse_payload(f_in)
-        images, boot_image = get_images(manifest)
 
-        print_status('Extracting', ', '.join(images), 'from the payload')
-        ota.extract_images(f_in, manifest, blob_offset, extract_dir, images)
-        shutil.copyfile(os.path.join(extract_dir, f'{boot_image}.img'), os.path.join(extract_dir, f'original_boot.img'))
-        shutil.copyfile(custom_boot, os.path.join(extract_dir, f'{boot_image}.img'))
-
-        boot_patches = [boot.MagiskRootPatch(magisk)]
-        vendor_boot_patches = [boot.OtaCertPatch(magisk, cert_ota)]
-
-        # Older devices don't have a vendor_boot
-        if 'vendor_boot' not in images:
-            boot_patches.extend(vendor_boot_patches)
-            vendor_boot_patches.clear()
+        print_status('Extracting vbmeta, boot from the payload')
+        ota.extract_images(f_in, manifest, blob_offset, extract_dir, ['vbmeta', 'boot'])
 
         avb = avbtool.Avb()
 
         print_status('Patching boot image')
         boot.patch_boot(
             avb,
-            os.path.join(extract_dir, f'original_boot.img'),
-            os.path.join(extract_dir, f'{boot_image}.img'),
-            os.path.join(patch_dir, f'{boot_image}.img'),
+            os.path.join(extract_dir, 'boot.img'),
+            custom_boot,
+            boot_out,
             privkey_avb,
             True,
-            boot_patches,
         )
-
-        if vendor_boot_patches:
-            print_status('Patching vendor_boot image')
-            boot.patch_boot(
-                avb,
-                os.path.join(extract_dir, 'vendor_boot.img'),
-                os.path.join(extract_dir, 'vendor_boot.img'),
-                os.path.join(patch_dir, 'vendor_boot.img'),
-                privkey_avb,
-                True,
-                vendor_boot_patches,
-            )
 
         print_status('Building new root vbmeta image')
         vbmeta.patch_vbmeta_root(
             avb,
-            [os.path.join(patch_dir, f'{i}.img')
-                for i in images if i != 'vbmeta'],
+            [boot_out],
             os.path.join(extract_dir, 'vbmeta.img'),
-            os.path.join(patch_dir, 'vbmeta.img'),
+            vbmeta_out,
             privkey_avb,
             manifest.block_size,
         )
 
-        print_status('Updating OTA payload to reference patched images')
-        return ota.patch_payload(
-            f_in,
-            f_out,
-            version,
-            manifest,
-            blob_offset,
-            payload_dir,
-            {i: os.path.join(patch_dir, f'{i}.img') for i in images},
-            file_size,
-            privkey_ota,
-        )
 
-
-def patch_ota_zip(f_zip_in, f_zip_out, magisk, custom_boot, privkey_avb, privkey_ota,
-                  cert_ota):
+def patch_ota_zip(f_zip_in, boot_out, vbmeta_out, custom_boot, privkey_avb):
     with (
         zipfile.ZipFile(f_zip_in, 'r') as z_in,
-        zipfile.ZipFile(f_zip_out, 'w') as z_out,
     ):
         infolist = z_in.infolist()
         missing = {PATH_METADATA_PB, PATH_PAYLOAD, PATH_PROPERTIES}
@@ -174,7 +110,6 @@ def patch_ota_zip(f_zip_in, f_zip_out, magisk, custom_boot, privkey_avb, privkey
             # Copy other files, patching if needed
             with (
                 z_in.open(info, 'r') as f_in,
-                z_out.open(info, 'w') as f_out,
             ):
                 if info.filename == PATH_PAYLOAD:
                     print_status('Patching', info.filename)
@@ -184,36 +119,17 @@ def patch_ota_zip(f_zip_in, f_zip_out, magisk, custom_boot, privkey_avb, privkey
 
                     properties = patch_ota_payload(
                         f_in,
-                        f_out,
+                        boot_out,
+                        vbmeta_out,
                         info.file_size,
-                        magisk,
                         custom_boot,
                         privkey_avb,
-                        privkey_ota,
-                        cert_ota,
                     )
-
-                elif info.filename == PATH_PROPERTIES:
-                    print_status('Patching', info.filename)
-
-                    if info.compress_type != zipfile.ZIP_STORED:
-                        raise Exception(f'{info.filename} is not stored uncompressed')
-
-                    f_out.write(properties)
-
-                else:
-                    print_status('Copying', info.filename)
-
-                    shutil.copyfileobj(f_in, f_out)
 
         return metadata
 
 
 def patch_subcommand(args):
-    output = args.output
-    if output is None:
-        output = args.input + '.patched'
-
     # Decrypt keys to temp directory in RAM
     with tempfile.TemporaryDirectory(dir='/dev/shm') as key_dir:
         print_status('Decrypting keys to RAM-based temporary directory')
@@ -222,50 +138,13 @@ def patch_subcommand(args):
         dec_privkey_avb = os.path.join(key_dir, 'avb.key')
         openssl.decrypt_key(args.privkey_avb, dec_privkey_avb)
 
-        # AOSP's OTA utils require a DER-encoded private key with the `.pk8`
-        # extension and a PEM-encoded certificate with the `.x509.pem` extension
-        dec_privkey_ota = os.path.join(key_dir, 'ota.pk8')
-        key_prefix_ota = dec_privkey_ota[:-4]
-        openssl.decrypt_key(args.privkey_ota, dec_privkey_ota, out_form='DER')
-
-        cert_ota = os.path.join(key_dir, 'ota.x509.pem')
-        shutil.copyfile(args.cert_ota, cert_ota)
-
-        # Ensure that the certificate matches the private key
-        if not openssl.cert_matches_key(cert_ota, dec_privkey_ota):
-            raise Exception('OTA certificate does not match private key')
-
-        with tempfile.NamedTemporaryFile() as temp_unsigned:
-            metadata = patch_ota_zip(
-                args.input,
-                temp_unsigned,
-                args.magisk,
-                args.custom_boot,
-                dec_privkey_avb,
-                dec_privkey_ota,
-                cert_ota,
-            )
-
-            print_status('Signing OTA zip')
-            with util.open_output_file(output) as temp_signed:
-                ota.sign_zip(
-                    temp_unsigned.name,
-                    temp_signed.name,
-                    key_prefix_ota,
-                    metadata,
-                )
-
-
-def extract_subcommand(args):
-    with zipfile.ZipFile(args.input, 'r') as z:
-        info = z.getinfo(PATH_PAYLOAD)
-
-        with z.open(info, 'r') as f:
-            _, manifest, blob_offset = ota.parse_payload(f)
-            images, _ = get_images(manifest)
-
-            print_status('Extracting', ', '.join(images), 'from the payload')
-            ota.extract_images(f, manifest, blob_offset, args.directory, images)
+        patch_ota_zip(
+            args.input,
+            args.output_boot,
+            args.output_vbmeta,
+            args.custom_boot,
+            dec_privkey_avb,
+        )
 
 
 def parse_args():
@@ -277,26 +156,14 @@ def parse_args():
 
     patch.add_argument('--input', required=True,
                        help='Path to original raw payload or OTA zip')
-    patch.add_argument('--output',
-                       help='Path to new raw payload or OTA zip')
-    patch.add_argument('--magisk', required=True,
-                       help='Path to Magisk API')
     patch.add_argument('--custom_boot', required=True,
-                       help='Path to Custom Boot')
+                       help='Path to custom boot')
+    patch.add_argument('--output_boot', required=True,
+                       help='Path to patched boot')
+    patch.add_argument('--output_vbmeta', required=True,
+                       help='Path to patched vbmeta')
     patch.add_argument('--privkey-avb', required=True,
                        help='Private key for signing root vbmeta image')
-    patch.add_argument('--privkey-ota', required=True,
-                       help='Private key for signing OTA payload')
-    patch.add_argument('--cert-ota', required=True,
-                       help='Certificate for OTA payload signing key')
-
-    extract = subparsers.add_parser(
-        'extract', help='Extract patched images from a patched OTA zip')
-
-    extract.add_argument('--input', required=True,
-                         help='Path to patched OTA zip')
-    extract.add_argument('--directory', default='.',
-                         help='Output directory for extracted images')
 
     return parser.parse_args()
 
@@ -306,8 +173,6 @@ def main():
 
     if args.subcommand == 'patch':
         patch_subcommand(args)
-    elif args.subcommand == 'extract':
-        extract_subcommand(args)
     else:
         raise NotImplementedError()
 
